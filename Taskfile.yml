@@ -1,0 +1,61 @@
+version: "3"
+
+tasks:
+  default:
+    desc: Show available tasks
+    cmds:
+      - task --list
+
+  install:
+    desc: Install dependencies
+    cmds:
+      - pnpm install
+    sources:
+      - package.json
+      - pnpm-lock.yaml
+    generates:
+      - node_modules/.modules.yaml
+
+  check:
+    desc: Type-check TypeScript
+    deps: [install]
+    cmds:
+      - pnpm check
+    sources:
+      - src/**/*.ts
+      - test/**/*.ts
+      - package.json
+      - tsconfig.json
+
+  test:
+    desc: Run tests
+    deps: [install]
+    cmds:
+      - pnpm test
+    sources:
+      - src/**/*.ts
+      - test/**/*.ts
+      - package.json
+      - tsconfig.json
+
+  build:
+    desc: Build distributable package
+    deps: [install]
+    cmds:
+      - pnpm build
+    sources:
+      - src/**/*.ts
+      - package.json
+      - tsconfig.json
+    generates:
+      - dist/index.js
+      - dist/index.d.ts
+
+  ci:
+    desc: Run type-check, tests, and build
+    deps: [check, test, build]
+
+  clean:
+    desc: Remove build artifacts
+    cmds:
+      - trash dist .task || true
