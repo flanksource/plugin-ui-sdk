@@ -55,6 +55,12 @@ tasks:
     desc: Run type-check, tests, and build
     deps: [check, test, build]
 
+  example:
+    desc: Start the example server
+    dir: example
+    cmds:
+      - direnv exec . pnpm dev
+
   clean:
     desc: Remove build artifacts
     cmds:
