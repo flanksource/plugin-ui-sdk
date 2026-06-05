@@ -1,6 +1,12 @@
 import { afterEach, describe, expect, it, vi } from "vitest";
 
-import { invoke, ready, stream } from "../src/index.js";
+import {
+  createMissionControlClient,
+  createPluginRuntime,
+  invoke,
+  ready,
+  stream,
+} from "../src/index.js";
 
 type WindowStub = {
   location: URL;
@@ -97,5 +103,73 @@ describe("ready", () => {
     ready();
 
     expect(win.parent.postMessage).toHaveBeenCalledWith({ type: "mc.tab.ready" }, "*");
+  });
+});
+
+describe("createPluginRuntime", () => {
+  it("creates operation URLs without relying on window", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    const runtime = createPluginRuntime({
+      pluginRef: "kubernetes-logs",
+      configId: "config-123",
+      fetch: fetchMock,
+    });
+
+    expect(runtime.operationURL("pods", { namespace: "default" })).toBe(
+      "/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
+    );
+
+    await runtime.invoke("pods", undefined, { query: { namespace: "default" } });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
+    );
+  });
+
+  it("supports custom base paths for host embedding", () => {
+    const runtime = createPluginRuntime({
+      pluginRef: "cost",
+      configId: "abc",
+      basePath: "/api/mission-control/api/plugins",
+    });
+
+    expect(runtime.operationURL("monthly")).toBe(
+      "/api/mission-control/api/plugins/cost/proxy/monthly?config_id=abc",
+    );
+  });
+});
+
+describe("createMissionControlClient", () => {
+  it("uses same-origin credentials for proxy mode", async () => {
+    const fetchMock = vi.fn(async () => new Response("[]"));
+    const client = createMissionControlClient({
+      mode: "proxy",
+      baseUrl: "/api/mission-control",
+      fetch: fetchMock,
+    });
+
+    await client.plugins.list();
+
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/mission-control/api/plugins");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("same-origin");
+  });
+
+  it("uses include credentials for pass-through mode", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    const client = createMissionControlClient({
+      mode: "pass-through",
+      baseUrl: "https://mc.example.com",
+      fetch: fetchMock,
+    });
+
+    await client.plugins.invoke("kubernetes-logs", "pods", {
+      configId: "config-123",
+      query: { namespace: "default" },
+    });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "https://mc.example.com/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
+    );
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("include");
   });
 });
