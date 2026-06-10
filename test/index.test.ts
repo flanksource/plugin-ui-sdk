@@ -2,30 +2,12 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 
 import {
   createMissionControlClient,
-  createPluginRuntime,
-  invoke,
-  ready,
-  stream,
+  createMissionControlPluginClient,
 } from "../src/index.js";
-
-type WindowStub = {
-  location: URL;
-  parent: { postMessage: ReturnType<typeof vi.fn> };
-};
 
 const originalWindow = globalThis.window;
 const originalFetch = globalThis.fetch;
 const originalEventSource = globalThis.EventSource;
-
-function setWindow(path: string): WindowStub {
-  const win = {
-    location: new URL(`https://mc.example.com${path}`),
-    parent: { postMessage: vi.fn() },
-  } as unknown as WindowStub;
-
-  vi.stubGlobal("window", win);
-  return win;
-}
 
 afterEach(() => {
   vi.unstubAllGlobals();
@@ -34,168 +16,174 @@ afterEach(() => {
   if (originalEventSource !== undefined) vi.stubGlobal("EventSource", originalEventSource);
 });
 
-describe("invoke", () => {
-  it("derives the installed plugin name and config_id from the iframe URL", async () => {
-    setWindow("/api/plugins/my-postgres/ui/query?config_id=config-123");
-    const fetchMock = vi.fn(async () => new Response("{}"));
-    vi.stubGlobal("fetch", fetchMock);
+describe("createMissionControlPluginClient", () => {
+  it("creates plugin instances scoped to pluginRef and configId", () => {
+    const client = createMissionControlPluginClient({
+      mode: "proxy",
+      baseUrl: "/api/mission-control",
+      fetch: vi.fn(),
+    });
 
-    await invoke("explain", { sql: "select 1" });
+    const plugin = client.New("kubernetes", " config-123 ");
+
+    expect(plugin.pluginRef).toBe("kubernetes");
+    expect(plugin.configId).toBe("config-123");
+  });
+
+  it("invokes plugin operations through /invoke by default", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    const client = createMissionControlPluginClient({
+      mode: "proxy",
+      baseUrl: "/api/mission-control",
+      fetch: fetchMock,
+    });
+    const plugin = client.New("kubernetes", "config-123");
+
+    await plugin.invoke("create-pod", {
+      namespace: "default",
+      name: "nginx",
+      image: "nginx:latest",
+    });
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/my-postgres/invoke/explain?config_id=config-123",
+      "/api/mission-control/api/plugins/kubernetes/invoke/create-pod?config_id=config-123",
     );
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("POST");
     expect(init.credentials).toBe("same-origin");
-    expect(init.body).toBe(JSON.stringify({ sql: "select 1" }));
+    expect(init.body).toBe(JSON.stringify({
+      namespace: "default",
+      name: "nginx",
+      image: "nginx:latest",
+    }));
     expect(new Headers(init.headers).get("content-type")).toBe("application/json");
   });
 
-  it("defaults to POST and sends the second argument as the invoke body", async () => {
-    setWindow("/api/plugins/kubernetes-logs/ui/logs?config_id=abc");
+  it("sends an empty params object when body is omitted", async () => {
     const fetchMock = vi.fn(async () => new Response("{}"));
-    vi.stubGlobal("fetch", fetchMock);
+    const client = createMissionControlPluginClient({
+      mode: "proxy",
+      baseUrl: "/",
+      fetch: fetchMock,
+    });
 
-    await invoke("logs", { tail: 100, container: "api", empty: null, repeated: ["a", "b"] });
+    await client.New("kubernetes").invoke("list-pods");
 
-    expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/kubernetes-logs/invoke/logs?config_id=abc",
-    );
-    const init = fetchMock.mock.calls[0][1] as RequestInit;
-    expect(init.method).toBe("POST");
-    expect(init.body).toBe(JSON.stringify({ tail: 100, container: "api", empty: null, repeated: ["a", "b"] }));
+    expect(fetchMock.mock.calls[0][0]).toBe("/api/plugins/kubernetes/invoke/list-pods");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe(JSON.stringify({}));
   });
 
-  it("uses the proxy endpoint and query params for GET requests", async () => {
-    setWindow("/api/plugins/kubernetes-logs/ui/logs?config_id=abc");
-    const fetchMock = vi.fn(async () => new Response("{}"));
-    vi.stubGlobal("fetch", fetchMock);
+  it("requires baseUrl", () => {
+    expect(() => createMissionControlPluginClient({ mode: "proxy", baseUrl: "" })).toThrow(
+      "baseUrl is required",
+    );
+  });
 
-    await invoke("logs", { tail: 100, container: "api", empty: null, repeated: ["a", "b"] }, {
+  it("uses /proxy and query params for GET requests", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    const client = createMissionControlPluginClient({
+      mode: "proxy",
+      baseUrl: "/api/mission-control",
+      fetch: fetchMock,
+    });
+    const plugin = client.New("kubernetes", "config-123");
+
+    await plugin.invoke("list-pods", {
+      namespace: "default",
+      labelSelector: "app=web",
+      empty: null,
+      repeated: ["a", "b"],
+    }, {
       method: "GET",
       proxy: true,
     });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/kubernetes-logs/proxy/logs?config_id=abc&tail=100&container=api&repeated=a&repeated=b",
+      "/api/mission-control/api/plugins/kubernetes/proxy/list-pods?config_id=config-123&namespace=default&labelSelector=app%3Dweb&repeated=a&repeated=b",
     );
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("GET");
     expect(init.body).toBeUndefined();
   });
 
-  it("sends an empty params object when body and query are omitted", async () => {
-    setWindow("/api/plugins/my-postgres/ui/query?config_id=config-123");
+  it("uses /proxy for body-capable methods when proxy is true", async () => {
     const fetchMock = vi.fn(async () => new Response("{}"));
-    vi.stubGlobal("fetch", fetchMock);
+    const client = createMissionControlPluginClient({
+      mode: "proxy",
+      baseUrl: "/api/mission-control",
+      fetch: fetchMock,
+    });
+    const plugin = client.New("kubernetes", "config-123");
 
-    await invoke("databases-list");
+    await plugin.invoke("create-pod", {
+      namespace: "default",
+      name: "nginx",
+      image: "nginx:latest",
+    }, { proxy: true });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/my-postgres/invoke/databases-list?config_id=config-123",
+      "/api/mission-control/api/plugins/kubernetes/proxy/create-pod?config_id=config-123",
     );
-    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe(JSON.stringify({}));
+    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("POST");
+    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe(JSON.stringify({
+      namespace: "default",
+      name: "nginx",
+      image: "nginx:latest",
+    }));
   });
-});
 
-describe("stream", () => {
-  it("opens an EventSource to the operation URL", () => {
-    setWindow("/api/plugins/kubernetes-logs/ui/logs?config_id=abc");
-
-    const eventSourceMock = vi.fn(function EventSourceStub(this: { url: string; options?: EventSourceInit }, url: string, options?: EventSourceInit) {
-      this.url = url;
-      this.options = options;
-    });
-    vi.stubGlobal("EventSource", eventSourceMock);
-
-    stream("tail", { pod: "api" }, { withCredentials: true });
-
-    expect(eventSourceMock).toHaveBeenCalledWith(
-      "/api/plugins/kubernetes-logs/proxy/tail?config_id=abc&pod=api",
-      { withCredentials: true },
-    );
-  });
-});
-
-describe("ready", () => {
-  it("posts the ready message to the parent frame", () => {
-    const win = setWindow("/api/plugins/demo/ui?config_id=abc");
-
-    ready();
-
-    expect(win.parent.postMessage).toHaveBeenCalledWith({ type: "mc.tab.ready" }, "*");
-  });
-});
-
-describe("createPluginRuntime", () => {
-  it("creates operation URLs without relying on window", async () => {
+  it("uses include credentials for pass-through mode", async () => {
     const fetchMock = vi.fn(async () => new Response("{}"));
-    const runtime = createPluginRuntime({
-      pluginRef: "kubernetes-logs",
-      configId: "config-123",
+    const client = createMissionControlPluginClient({
+      mode: "pass-through",
+      baseUrl: "https://mc.example.com",
       fetch: fetchMock,
     });
 
-    expect(runtime.operationURL("pods", { namespace: "default" })).toBe(
-      "/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
-    );
-    expect(runtime.operationURL("pods", { namespace: "default" }, { method: "GET", proxy: true })).toBe(
-      "/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
-    );
-
-    await runtime.invoke("pods", { namespace: "default" });
+    await client.New("kubernetes-logs", "config-123").invoke("pods", { namespace: "default" });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
+      "https://mc.example.com/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
     );
-    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe(JSON.stringify({ namespace: "default" }));
+    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("include");
   });
 
-  it("supports custom base paths for host embedding", () => {
-    const runtime = createPluginRuntime({
-      pluginRef: "cost",
-      configId: "abc",
-      basePath: "/api/mission-control/api/plugins",
+  it("opens streams through /proxy", () => {
+    const eventSourceMock = vi.fn(function EventSourceStub(
+      this: { url: string; options?: EventSourceInit },
+      url: string,
+      options?: EventSourceInit,
+    ) {
+      this.url = url;
+      this.options = options;
+    });
+    const client = createMissionControlPluginClient({
+      mode: "pass-through",
+      baseUrl: "https://mc.example.com",
+      EventSource: eventSourceMock as unknown as typeof EventSource,
     });
 
-    expect(runtime.operationURL("monthly")).toBe(
-      "/api/mission-control/api/plugins/cost/invoke/monthly?config_id=abc",
+    client.New("kubernetes-logs", "config-123").stream("tail", { pod: "api" });
+
+    expect(eventSourceMock).toHaveBeenCalledWith(
+      "https://mc.example.com/api/plugins/kubernetes-logs/proxy/tail?config_id=config-123&pod=api",
+      { withCredentials: true },
     );
   });
-});
 
-describe("createMissionControlClient", () => {
-  it("uses same-origin credentials for proxy mode", async () => {
-    const fetchMock = vi.fn(async () => new Response("[]"));
+  it("exports createMissionControlClient as a plugin client alias", async () => {
+    const fetchMock = vi.fn(async () => new Response("{}"));
     const client = createMissionControlClient({
       mode: "proxy",
       baseUrl: "/api/mission-control",
       fetch: fetchMock,
     });
 
-    await client.plugins.list();
-
-    expect(fetchMock.mock.calls[0][0]).toBe("/api/mission-control/api/plugins");
-    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("same-origin");
-  });
-
-  it("uses include credentials for pass-through mode", async () => {
-    const fetchMock = vi.fn(async () => new Response("{}"));
-    const client = createMissionControlClient({
-      mode: "pass-through",
-      baseUrl: "https://mc.example.com",
-      fetch: fetchMock,
-    });
-
-    await client.plugins.invoke("kubernetes-logs", "pods", { namespace: "default" }, {
-      configId: "config-123",
-    });
+    await client.New("kubernetes").invoke("list-pods");
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "https://mc.example.com/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
+      "/api/mission-control/api/plugins/kubernetes/invoke/list-pods",
     );
-    expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("include");
   });
 });

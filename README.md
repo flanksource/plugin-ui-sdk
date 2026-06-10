@@ -1,11 +1,6 @@
 # @flanksource/plugin-ui-sdk
 
-Browser SDK for Mission Control plugin UIs and host apps embedding Mission Control plugins.
-
-The SDK has two layers:
-
-1. **Plugin runtime API**: used inside a plugin UI to call its own backend operations.
-2. **Host client API**: used by Backstage/flanksource-ui/customer apps to connect to Mission Control via pass-through cookies or backend proxy auth.
+Browser SDK for calling Mission Control plugin operations.
 
 ## Install
 
@@ -13,120 +8,93 @@ The SDK has two layers:
 pnpm add @flanksource/plugin-ui-sdk
 ```
 
-## Plugin runtime API
+## Plugin client API
 
-For code running inside a Mission Control plugin UI:
+Create a Mission Control plugin client, then create an instance for a specific plugin/config pair:
 
 ```ts
-import { invoke, ready, stream } from "@flanksource/plugin-ui-sdk";
+import { createMissionControlPluginClient } from "@flanksource/plugin-ui-sdk";
+
+const pluginClient = createMissionControlPluginClient({
+  mode: "proxy",
+  baseUrl: "/api/mission-control",
+});
+
+const kubernetes = pluginClient.New("kubernetes", "config-123");
 ```
 
-### `invoke(operation, bodyOrQueryParams?, options?)`
+### `pluginClient.New(pluginRef, configId?)`
 
-Calls a plugin backend operation and returns the native `Response`.
+Creates a plugin instance scoped to a plugin ref and optional catalog config id.
+The instance exposes the operation methods.
+
+### `instance.invoke(operation, bodyOrQueryParams?, options?)`
+
+Calls a plugin operation and returns the native `Response`.
 
 ```ts
-const res = await invoke("query", {
-  sql: "select * from users limit 10",
-});
+const res = await kubernetes.invoke("list-pods");
 
 if (!res.ok) throw new Error(await res.text());
 const rows = await res.json();
 ```
 
-With parameters:
+With params/body:
 
 ```ts
-const res = await invoke("logs", {
-  tail: 100,
-  container: "api",
-});
-```
-
-Use the proxy endpoint for HTTP-style operations:
-
-```ts
-const res = await invoke("logs", { tail: 100, container: "api" }, {
-  method: "GET",
-  proxy: true,
+const res = await kubernetes.invoke("create-pod", {
+  namespace: "default",
+  name: "nginx",
+  image: "nginx:latest",
 });
 ```
 
 Behavior:
 
-- Uses the current plugin UI URL to find the installed plugin name.
-- Automatically includes the current `config_id`.
 - Defaults to `POST /api/plugins/:pluginRef/invoke/:operation`.
-- Set `options.proxy: true` to use `/proxy/:operation` instead.
+- Set `options.proxy: true` to use `/api/plugins/:pluginRef/proxy/:operation` instead; `pluginRef` comes from `pluginClient.New(pluginRef, configId)` and the HTTP method comes from `options.method`.
+- Sends the instance `configId` as the `config_id` query parameter.
 - Sends `{}` when no body is provided for methods that support a body.
-- For `GET`/`HEAD`, treats the second argument as query parameters.
+- For `GET`/`HEAD`, treats the second argument as query params.
 - JSON-encodes non-`BodyInit` bodies and sets `content-type: application/json`.
 
-The current URL convention is:
-
-```text
-/api/plugins/:pluginRef/ui?config_id=:configId
-/api/plugins/:pluginRef/invoke/:operation?config_id=:configId
-```
-
-### `stream(operation, query?, options?)`
-
-Opens an SSE stream to a plugin operation. Streaming continues to use Mission Control's `/proxy/` endpoint because `EventSource` uses GET.
+HTTP-style proxy request:
 
 ```ts
-const events = stream("tail-logs", { pod: "api-123", tail: 100 });
+const res = await kubernetes.invoke("list-pods", {
+  namespace: "default",
+  labelSelector: "app=web",
+}, {
+  method: "GET",
+  proxy: true,
+});
+// GET /api/plugins/kubernetes/proxy/list-pods?config_id=config-123&namespace=default&labelSelector=app%3Dweb
+```
+
+### `instance.stream(operation, query?)`
+
+Opens an SSE stream to a plugin operation via Mission Control's `/proxy/` endpoint.
+
+```ts
+const logs = pluginClient.New("kubernetes-logs", "config-123");
+const events = logs.stream("tail-logs", {
+  pod: "api-123",
+  tail: 100,
+});
 
 events.onmessage = event => {
   console.log(event.data);
 };
 ```
 
-### `ready()`
-
-Signals the host frame that the plugin UI has loaded.
-
-```ts
-ready();
-```
-
-Posts:
-
-```ts
-{ type: "mc.tab.ready" }
-```
-
-## Explicit plugin runtime
-
-For native embedding or tests, create a runtime explicitly instead of deriving context from the iframe URL:
-
-```ts
-import { createPluginRuntime } from "@flanksource/plugin-ui-sdk";
-
-const runtime = createPluginRuntime({
-  pluginRef: "kubernetes-logs",
-  configId: "config-123",
-  basePath: "/api/plugins",
-});
-
-const res = await runtime.invoke("list-pods", {
-  namespace: "default",
-});
-```
-
-## Host client API
-
-For apps embedding Mission Control plugin functionality:
-
-```ts
-import { createMissionControlClient } from "@flanksource/plugin-ui-sdk";
-```
+## Connection modes
 
 ### Proxy mode
 
 Browser calls the host backend. The host backend injects service auth and proxies to Mission Control.
 
 ```ts
-const mc = createMissionControlClient({
+const pluginClient = createMissionControlPluginClient({
   mode: "proxy",
   baseUrl: "/api/mission-control",
 });
@@ -137,7 +105,7 @@ const mc = createMissionControlClient({
 Browser calls Mission Control directly using Mission Control cookies/session.
 
 ```ts
-const mc = createMissionControlClient({
+const pluginClient = createMissionControlPluginClient({
   mode: "pass-through",
   baseUrl: "https://mission-control.example.com",
 });
@@ -145,54 +113,26 @@ const mc = createMissionControlClient({
 
 Pass-through requires Mission Control cookies and CORS to support credentialed browser requests.
 
-### Plugin discovery
-
-```ts
-const plugins = await mc.plugins.list();
-const plugin = await mc.plugins.get("kubernetes-logs");
-```
-
-### Invoke plugin operations from the host
-
-```ts
-const res = await mc.plugins.invoke("kubernetes-logs", "list-pods", {
-  namespace: "default",
-}, {
-  configId: "config-123",
-});
-
-const pods = await res.json();
-```
-
-### Stream plugin operations from the host
-
-```ts
-const events = mc.plugins.stream("kubernetes-logs", "tail-logs", {
-  configId: "config-123",
-  query: { pod: "api-123", container: "api" },
-});
-```
-
 ## Types
 
 Important exported types:
 
 ```ts
 type ConnectionMode = "pass-through" | "proxy";
-type QueryParams = Record<string, string | number | boolean | null | undefined>; // arrays also supported
+type QueryValue = string | number | boolean | null | undefined;
+type QueryParams = Record<string, QueryValue | readonly QueryValue[]>;
 
-interface MissionControlClient {
+interface MissionControlPluginClient {
   mode: ConnectionMode;
   baseUrl: string;
-  request(path: string, init?: RequestInit): Promise<Response>;
-  plugins: PluginRegistryApi;
+  New(pluginRef: string, configId?: string): MissionControlPluginInstance;
 }
 
-interface PluginRegistryApi {
-  list(): Promise<PluginManifest[]>;
-  get(pluginRef: string): Promise<PluginManifest>;
-  invoke(pluginRef: string, operation: string, bodyOrQueryParams?: unknown, options?: PluginInvokeOptions): Promise<Response>;
-  stream(pluginRef: string, operation: string, request?: PluginStreamRequest): EventSource;
+interface MissionControlPluginInstance {
+  pluginRef: string;
+  configId?: string;
+  invoke(operation: string, bodyOrQueryParams?: unknown, options?: PluginInvokeOptions): Promise<Response>;
+  stream(operation: string, query?: QueryParams): EventSource;
 }
 ```
 
@@ -202,7 +142,7 @@ Build plugin UIs as relocatable static apps:
 
 - Use relative asset URLs. For Vite, set `base: "./"`.
 - Use hash routing for internal UI routes.
-- Use `invoke()` and `stream()` for plugin backend calls instead of hardcoding `/api/plugins/...` URLs.
+- Use `instance.invoke()` and `instance.stream()` for plugin backend calls instead of hardcoding `/api/plugins/...` URLs.
 
 Vite example:
 
