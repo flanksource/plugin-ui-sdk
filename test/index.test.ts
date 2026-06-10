@@ -44,7 +44,7 @@ describe("invoke", () => {
 
     expect(fetchMock).toHaveBeenCalledOnce();
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/my-postgres/proxy/explain?config_id=config-123",
+      "/api/plugins/my-postgres/invoke/explain?config_id=config-123",
     );
     const init = fetchMock.mock.calls[0][1] as RequestInit;
     expect(init.method).toBe("POST");
@@ -53,27 +53,50 @@ describe("invoke", () => {
     expect(new Headers(init.headers).get("content-type")).toBe("application/json");
   });
 
-  it("defaults to GET and appends query params when body is omitted", async () => {
+  it("defaults to POST and sends the second argument as the invoke body", async () => {
     setWindow("/api/plugins/kubernetes-logs/ui/logs?config_id=abc");
     const fetchMock = vi.fn(async () => new Response("{}"));
     vi.stubGlobal("fetch", fetchMock);
 
-    await invoke("logs", undefined, {
-      query: { tail: 100, container: "api", empty: null, repeated: ["a", "b"] },
+    await invoke("logs", { tail: 100, container: "api", empty: null, repeated: ["a", "b"] });
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/plugins/kubernetes-logs/invoke/logs?config_id=abc",
+    );
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("POST");
+    expect(init.body).toBe(JSON.stringify({ tail: 100, container: "api", empty: null, repeated: ["a", "b"] }));
+  });
+
+  it("uses the proxy endpoint and query params for GET requests", async () => {
+    setWindow("/api/plugins/kubernetes-logs/ui/logs?config_id=abc");
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await invoke("logs", { tail: 100, container: "api", empty: null, repeated: ["a", "b"] }, {
+      method: "GET",
+      proxy: true,
     });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
       "/api/plugins/kubernetes-logs/proxy/logs?config_id=abc&tail=100&container=api&repeated=a&repeated=b",
     );
-    expect((fetchMock.mock.calls[0][1] as RequestInit).method).toBe("GET");
+    const init = fetchMock.mock.calls[0][1] as RequestInit;
+    expect(init.method).toBe("GET");
+    expect(init.body).toBeUndefined();
   });
 
-  it("does not allow a body on GET", async () => {
+  it("sends an empty params object when body and query are omitted", async () => {
     setWindow("/api/plugins/my-postgres/ui/query?config_id=config-123");
+    const fetchMock = vi.fn(async () => new Response("{}"));
+    vi.stubGlobal("fetch", fetchMock);
 
-    await expect(invoke("query", { sql: "select 1" }, { method: "GET" })).rejects.toThrow(
-      "GET requests cannot include a body",
+    await invoke("databases-list");
+
+    expect(fetchMock.mock.calls[0][0]).toBe(
+      "/api/plugins/my-postgres/invoke/databases-list?config_id=config-123",
     );
+    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe(JSON.stringify({}));
   });
 });
 
@@ -116,14 +139,18 @@ describe("createPluginRuntime", () => {
     });
 
     expect(runtime.operationURL("pods", { namespace: "default" })).toBe(
+      "/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
+    );
+    expect(runtime.operationURL("pods", { namespace: "default" }, { method: "GET", proxy: true })).toBe(
       "/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
     );
 
-    await runtime.invoke("pods", undefined, { query: { namespace: "default" } });
+    await runtime.invoke("pods", { namespace: "default" });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
+      "/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
     );
+    expect((fetchMock.mock.calls[0][1] as RequestInit).body).toBe(JSON.stringify({ namespace: "default" }));
   });
 
   it("supports custom base paths for host embedding", () => {
@@ -134,7 +161,7 @@ describe("createPluginRuntime", () => {
     });
 
     expect(runtime.operationURL("monthly")).toBe(
-      "/api/mission-control/api/plugins/cost/proxy/monthly?config_id=abc",
+      "/api/mission-control/api/plugins/cost/invoke/monthly?config_id=abc",
     );
   });
 });
@@ -162,13 +189,12 @@ describe("createMissionControlClient", () => {
       fetch: fetchMock,
     });
 
-    await client.plugins.invoke("kubernetes-logs", "pods", {
+    await client.plugins.invoke("kubernetes-logs", "pods", { namespace: "default" }, {
       configId: "config-123",
-      query: { namespace: "default" },
     });
 
     expect(fetchMock.mock.calls[0][0]).toBe(
-      "https://mc.example.com/api/plugins/kubernetes-logs/proxy/pods?config_id=config-123&namespace=default",
+      "https://mc.example.com/api/plugins/kubernetes-logs/invoke/pods?config_id=config-123",
     );
     expect((fetchMock.mock.calls[0][1] as RequestInit).credentials).toBe("include");
   });

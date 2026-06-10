@@ -33,7 +33,7 @@ export function Logs() {
     setEvents([])
 
     try {
-      const res = await plugins.invoke(pluginRef, 'list-pods', {
+      const res = await plugins.invoke(pluginRef, 'list-pods', undefined, {
         configId: configId || undefined,
       })
       const text = await res.text()
@@ -59,14 +59,13 @@ export function Logs() {
 
     try {
       const res = await plugins.invoke(pluginRef, 'logs', {
+        namespace,
+        pod: pod || undefined,
+        container: container || undefined,
+        tailLines: Number(tail) || undefined,
+        follow: false,
+      }, {
         configId: configId || undefined,
-        query: {
-          namespace,
-          pod: pod || undefined,
-          container: container || undefined,
-          tailLines: Number(tail) || undefined,
-          follow: false,
-        },
       })
 
       const text = await res.text()

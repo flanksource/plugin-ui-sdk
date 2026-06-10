@@ -21,7 +21,7 @@ For code running inside a Mission Control plugin UI:
 import { invoke, ready, stream } from "@flanksource/plugin-ui-sdk";
 ```
 
-### `invoke(operation, body?, options?)`
+### `invoke(operation, bodyOrQueryParams?, options?)`
 
 Calls a plugin backend operation and returns the native `Response`.
 
@@ -34,12 +34,21 @@ if (!res.ok) throw new Error(await res.text());
 const rows = await res.json();
 ```
 
-With query parameters:
+With parameters:
 
 ```ts
-const res = await invoke("logs", undefined, {
+const res = await invoke("logs", {
+  tail: 100,
+  container: "api",
+});
+```
+
+Use the proxy endpoint for HTTP-style operations:
+
+```ts
+const res = await invoke("logs", { tail: 100, container: "api" }, {
   method: "GET",
-  query: { tail: 100, container: "api" },
+  proxy: true,
 });
 ```
 
@@ -47,20 +56,22 @@ Behavior:
 
 - Uses the current plugin UI URL to find the installed plugin name.
 - Automatically includes the current `config_id`.
-- Defaults to `POST` when `body` is provided.
-- Defaults to `GET` when no `body` is provided.
+- Defaults to `POST /api/plugins/:pluginRef/invoke/:operation`.
+- Set `options.proxy: true` to use `/proxy/:operation` instead.
+- Sends `{}` when no body is provided for methods that support a body.
+- For `GET`/`HEAD`, treats the second argument as query parameters.
 - JSON-encodes non-`BodyInit` bodies and sets `content-type: application/json`.
 
 The current URL convention is:
 
 ```text
 /api/plugins/:pluginRef/ui?config_id=:configId
-/api/plugins/:pluginRef/proxy/:operation?config_id=:configId
+/api/plugins/:pluginRef/invoke/:operation?config_id=:configId
 ```
 
 ### `stream(operation, query?, options?)`
 
-Opens an SSE stream to a plugin operation.
+Opens an SSE stream to a plugin operation. Streaming continues to use Mission Control's `/proxy/` endpoint because `EventSource` uses GET.
 
 ```ts
 const events = stream("tail-logs", { pod: "api-123", tail: 100 });
@@ -97,8 +108,8 @@ const runtime = createPluginRuntime({
   basePath: "/api/plugins",
 });
 
-const res = await runtime.invoke("list-pods", undefined, {
-  query: { namespace: "default" },
+const res = await runtime.invoke("list-pods", {
+  namespace: "default",
 });
 ```
 
@@ -145,8 +156,9 @@ const plugin = await mc.plugins.get("kubernetes-logs");
 
 ```ts
 const res = await mc.plugins.invoke("kubernetes-logs", "list-pods", {
+  namespace: "default",
+}, {
   configId: "config-123",
-  query: { namespace: "default" },
 });
 
 const pods = await res.json();
@@ -167,7 +179,7 @@ Important exported types:
 
 ```ts
 type ConnectionMode = "pass-through" | "proxy";
-type QueryParams = Record<string, string | number | boolean | null | undefined>;
+type QueryParams = Record<string, string | number | boolean | null | undefined>; // arrays also supported
 
 interface MissionControlClient {
   mode: ConnectionMode;
@@ -179,7 +191,7 @@ interface MissionControlClient {
 interface PluginRegistryApi {
   list(): Promise<PluginManifest[]>;
   get(pluginRef: string): Promise<PluginManifest>;
-  invoke(pluginRef: string, operation: string, request?: PluginInvokeRequest): Promise<Response>;
+  invoke(pluginRef: string, operation: string, bodyOrQueryParams?: unknown, options?: PluginInvokeOptions): Promise<Response>;
   stream(pluginRef: string, operation: string, request?: PluginStreamRequest): EventSource;
 }
 ```

@@ -3,7 +3,7 @@ export type QueryValue = string | number | boolean | null | undefined;
 export type QueryParams = Record<string, QueryValue | readonly QueryValue[]>;
 
 export type InvokeOptions = Omit<RequestInit, "body"> & {
-  query?: QueryParams;
+  proxy?: boolean;
 };
 
 export type StreamOptions = EventSourceInit;
@@ -24,8 +24,8 @@ export type PluginRuntime = {
   pluginRef: string;
   configId?: string;
   basePath: string;
-  operationURL(operation: string, query?: QueryParams): string;
-  invoke(operation: string, body?: unknown, options?: InvokeOptions): Promise<Response>;
+  operationURL(operation: string, bodyOrQueryParams?: unknown, options?: InvokeOptions): string;
+  invoke(operation: string, bodyOrQueryParams?: unknown, options?: InvokeOptions): Promise<Response>;
   stream(operation: string, query?: QueryParams, options?: StreamOptions): EventSource;
 };
 
@@ -46,7 +46,7 @@ export type MissionControlClient = {
 export type PluginRegistryApi = {
   list(): Promise<PluginManifest[]>;
   get(pluginRef: string): Promise<PluginManifest>;
-  invoke(pluginRef: string, operation: string, request?: PluginInvokeRequest): Promise<Response>;
+  invoke(pluginRef: string, operation: string, bodyOrQueryParams?: unknown, options?: PluginInvokeOptions): Promise<Response>;
   stream(pluginRef: string, operation: string, request?: PluginStreamRequest): EventSource;
 };
 
@@ -73,11 +73,8 @@ export type PluginComponent = {
   operation?: string;
 };
 
-export type PluginInvokeRequest = {
+export type PluginInvokeOptions = InvokeOptions & {
   configId?: string;
-  body?: unknown;
-  query?: QueryParams;
-  init?: Omit<RequestInit, "body">;
 };
 
 export type PluginStreamRequest = {
@@ -131,31 +128,51 @@ export function createPluginRuntime(context: PluginRuntimeContext): PluginRuntim
   const fetchImpl = context.fetch;
   const EventSourceImpl = context.EventSource;
 
-  const operationURL = (operation: string, query?: QueryParams): string =>
-    pluginOperationURL({
-      basePath,
-      pluginRef,
-      operation,
-      configId,
-      query,
-    });
+  const operationURL = (
+    operation: string,
+    bodyOrQueryParams?: unknown,
+    options: InvokeOptions = {},
+  ): string =>
+    pluginOperationURL(
+      {
+        basePath,
+        pluginRef,
+        operation,
+        configId,
+        query: queryForMethod(options.method, bodyOrQueryParams),
+      },
+      options.proxy ? "proxy" : "invoke",
+    );
 
   return {
     pluginRef,
     configId,
     basePath,
     operationURL,
-    invoke(operation: string, body?: unknown, options: InvokeOptions = {}): Promise<Response> {
+    invoke(
+      operation: string,
+      bodyOrQueryParams?: unknown,
+      options: InvokeOptions = {},
+    ): Promise<Response> {
       return invokeURL(
         fetchImpl ?? globalFetch(),
-        operationURL(operation, options.query),
-        body,
+        operationURL(operation, bodyOrQueryParams, options),
+        bodyOrQueryParams,
         options,
       );
     },
     stream(operation: string, query?: QueryParams, options?: StreamOptions): EventSource {
       const EventSourceCtor = EventSourceImpl ?? globalEventSource();
-      return new EventSourceCtor(operationURL(operation, query), options);
+      return new EventSourceCtor(
+        pluginProxyOperationURL({
+          basePath,
+          pluginRef,
+          operation,
+          configId,
+          query,
+        }),
+        options,
+      );
     },
   };
 }
@@ -199,15 +216,16 @@ export function createMissionControlClient(options: MissionControlClientOptions)
     invoke(
       pluginRef: string,
       operation: string,
-      pluginRequest: PluginInvokeRequest = {},
+      bodyOrQueryParams?: unknown,
+      options: PluginInvokeOptions = {},
     ): Promise<Response> {
-      return runtimeFor(pluginRef, pluginRequest.configId).invoke(
+      const { configId, ...invokeOptions } = options;
+      return runtimeFor(pluginRef, configId).invoke(
         operation,
-        pluginRequest.body,
+        bodyOrQueryParams,
         {
-          ...pluginRequest.init,
-          query: pluginRequest.query,
-          credentials: pluginRequest.init?.credentials ?? defaultCredentials,
+          ...invokeOptions,
+          credentials: invokeOptions.credentials ?? defaultCredentials,
         },
       );
     },
@@ -251,16 +269,12 @@ function invokeURL(
   body?: unknown,
   options: InvokeOptions = {},
 ): Promise<Response> {
-  const { query: _query, ...requestInit } = options;
-  const hasBody = body !== undefined;
-  const method = requestMethod(requestInit.method, hasBody);
-
-  if (hasBody && isBodylessMethod(method)) {
-    throw sdkError(`${method} requests cannot include a body; use query params instead`);
-  }
-
+  const { proxy: _proxy, method: configuredMethod, ...requestInit } = options;
+  const method = requestMethod(configuredMethod);
+  const bodyless = isBodylessMethod(method);
+  const payload = body === undefined ? {} : body;
   const headers = new Headers(requestInit.headers);
-  const encodedBody = hasBody ? encodeBody(body, headers) : undefined;
+  const encodedBody = bodyless ? undefined : encodeBody(payload, headers);
 
   return fetchImpl(url, {
     ...requestInit,
@@ -293,16 +307,29 @@ function runtimeContext(win: Window): WindowRuntimeContext {
   };
 }
 
-function pluginOperationURL(args: {
+function pluginProxyOperationURL(args: {
   basePath: string;
   pluginRef: string;
   operation: string;
   configId?: string;
   query?: QueryParams;
 }): string {
+  return pluginOperationURL(args, "proxy");
+}
+
+function pluginOperationURL(
+  args: {
+    basePath: string;
+    pluginRef: string;
+    operation: string;
+    configId?: string;
+    query?: QueryParams;
+  },
+  endpoint: "invoke" | "proxy",
+): string {
   const operation = validateOperation(args.operation);
   const url = new URL(
-    `${args.basePath}/${encodeURIComponent(args.pluginRef)}/proxy/${encodeURIComponent(operation)}`,
+    `${args.basePath}/${encodeURIComponent(args.pluginRef)}/${endpoint}/${encodeURIComponent(operation)}`,
     fallbackBaseURL(),
   );
 
@@ -363,12 +390,28 @@ function isBodyInit(value: unknown): value is BodyInit {
   );
 }
 
-function requestMethod(method: string | undefined, hasBody: boolean): string {
-  return (method ?? (hasBody ? "POST" : "GET")).toUpperCase();
+function requestMethod(method: string | undefined): string {
+  return (method ?? "POST").toUpperCase();
 }
 
 function isBodylessMethod(method: string): boolean {
   return method === "GET" || method === "HEAD";
+}
+
+function queryForMethod(
+  method: string | undefined,
+  bodyOrQueryParams: unknown,
+): QueryParams | undefined {
+  if (!isBodylessMethod(requestMethod(method))) return undefined;
+  if (bodyOrQueryParams === undefined || bodyOrQueryParams === null) return undefined;
+  if (isPlainQueryParams(bodyOrQueryParams)) return bodyOrQueryParams;
+  throw sdkError("GET and HEAD requests require query params as a plain object");
+}
+
+function isPlainQueryParams(value: unknown): value is QueryParams {
+  if (!value || typeof value !== "object") return false;
+  if (isBodyInit(value)) return false;
+  return Object.getPrototypeOf(value) === Object.prototype;
 }
 
 function credentialsForMode(mode: ConnectionMode): RequestCredentials {
