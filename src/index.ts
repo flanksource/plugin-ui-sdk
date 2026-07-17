@@ -270,7 +270,10 @@ function requirePathSegment(value: string, field: string): string {
 }
 
 function trimTrailingSlash(value: string): string {
-  return value.trim().replace(/\/+$/, "");
+  const trimmed = value.trim();
+  let end = trimmed.length;
+  while (end > 0 && trimmed[end - 1] === "/") end--;
+  return trimmed.slice(0, end);
 }
 
 function joinURL(base: string, path: string): string {
