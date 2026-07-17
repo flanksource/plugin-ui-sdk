@@ -4,14 +4,18 @@ on:
   push:
     branches: [main]
 
+# Least-privilege default for the whole workflow; individual jobs opt in to the
+# additional scopes they need.
 permissions:
-  id-token: write
-  contents: write
+  contents: read
 
 jobs:
   version-bump:
     name: Bump Version
     runs-on: ubuntu-latest
+    # Pushes the version-bump commit and tag back to the repository.
+    permissions:
+      contents: write
     if: "!contains(github.event.head_commit.message, '[skip ci]')"
     outputs:
       new_version: ${{ steps.bump.outputs.new_version }}
@@ -56,6 +60,11 @@ jobs:
     name: Build and Publish
     needs: version-bump
     runs-on: ubuntu-latest
+    # id-token: write is required for npm provenance (OIDC); contents: read to
+    # check out the tagged commit.
+    permissions:
+      contents: read
+      id-token: write
     steps:
       - name: Checkout code
         uses: actions/checkout@v4
@@ -93,6 +102,9 @@ jobs:
     name: Create GitHub Release
     needs: version-bump
     runs-on: ubuntu-latest
+    # Creates a GitHub Release for the new tag.
+    permissions:
+      contents: write
     steps:
       - name: Create Release
         env:
